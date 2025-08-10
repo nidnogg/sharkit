@@ -23,12 +23,15 @@ struct Entry {
 struct App {
     items: Vec<Entry>,
     cursor: usize,
+    preview_content: String,
 }
 
 impl App {
     fn new(mut items: Vec<Entry>) -> Self {
         items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        Self { items, cursor: 0 }
+        let mut app = Self { items, cursor: 0, preview_content: String::new() };
+        app.update_preview();
+        app
     }
     fn select_all(&mut self) {
         for it in &mut self.items { it.selected = true; }
@@ -52,16 +55,41 @@ impl App {
     fn move_up(&mut self) {
         if self.items.is_empty() { return; }
         if self.cursor == 0 { self.cursor = self.items.len() - 1; } else { self.cursor -= 1; }
+        self.update_preview();
     }
     fn move_down(&mut self) {
         if self.items.is_empty() { return; }
         self.cursor = (self.cursor + 1) % self.items.len();
+        self.update_preview();
     }
     fn selected_paths(&self) -> Vec<PathBuf> {
         self.items.iter().filter(|e| e.selected).map(|e| e.path.clone()).collect()
     }
     fn selected_count(&self) -> usize {
         self.items.iter().filter(|e| e.selected).count()
+    }
+    
+    fn update_preview(&mut self) {
+        if self.items.is_empty() {
+            self.preview_content = "No files available".to_string();
+            return;
+        }
+        
+        let current_file = &self.items[self.cursor].path;
+        self.preview_content = match fs::read_to_string(current_file) {
+            Ok(content) => {
+                if content.is_empty() {
+                    "<empty file>".to_string()
+                } else if content.len() > 10000 {
+                    format!("{}
+
+... (truncated, file is {} bytes)", &content[..10000], content.len())
+                } else {
+                    content
+                }
+            }
+            Err(e) => format!("Error reading file: {}", e),
+        };
     }
 }
 
@@ -87,10 +115,15 @@ fn list_files() -> io::Result<Vec<Entry>> {
 }
 
 fn draw(ui: &mut Frame, app: &App, list_state: &mut ListState) {
-    let chunks = Layout::default()
+    let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(2)].as_ref())
         .split(ui.size());
+
+    let horizontal_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)].as_ref())
+        .split(main_chunks[0]);
 
     let items: Vec<ListItem> = app.items.iter().enumerate().map(|(i, e)| {
         let mark = if e.selected { "✓" } else { " " };
@@ -108,14 +141,27 @@ fn draw(ui: &mut Frame, app: &App, list_state: &mut ListState) {
         .highlight_style(Style::default().bg(Color::Cyan).fg(Color::Black))
         .highlight_symbol("› ");
 
-    ui.render_stateful_widget(list, chunks[0], list_state);
+    ui.render_stateful_widget(list, horizontal_chunks[0], list_state);
+
+    let preview_title = if app.items.is_empty() {
+        "Preview".to_string()
+    } else {
+        format!("Preview: {}", app.items[app.cursor].name)
+    };
+
+    let preview = Paragraph::new(app.preview_content.as_str())
+        .block(Block::default().title(preview_title).borders(Borders::ALL))
+        .wrap(Wrap { trim: false })
+        .scroll((0, 0));
+
+    ui.render_widget(preview, horizontal_chunks[1]);
 
     let help = Paragraph::new(format!(
         "[↑/↓ or j/k] move  [space] toggle  [a/A] all  [n] none  [shift+1..9] only nth  [shift+0] only last  [enter] confirm  [q/esc] quit   {} selected",
         app.selected_count()
     ))
     .wrap(Wrap { trim: true });
-    ui.render_widget(help, chunks[1]);
+    ui.render_widget(help, main_chunks[1]);
 }
 
 fn main() -> Result<()> {
