@@ -1,4 +1,4 @@
-use std::{cmp::min, fs, io, path::PathBuf};
+use std::{fs, io, path::PathBuf};
 use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
@@ -24,12 +24,19 @@ struct App {
     items: Vec<Entry>,
     cursor: usize,
     preview_content: String,
+    show_preview: bool,
 }
 
 impl App {
     fn new(mut items: Vec<Entry>) -> Self {
-        items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        let mut app = Self { items, cursor: 0, preview_content: String::new() };
+        items.sort_by(|a, b| {
+            match (a.hidden, b.hidden) {
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            }
+        });
+        let mut app = Self { items, cursor: 0, preview_content: String::new(), show_preview: true };
         app.update_preview();
         app
     }
@@ -91,6 +98,10 @@ impl App {
             Err(e) => format!("Error reading file: {}", e),
         };
     }
+    
+    fn toggle_preview(&mut self) {
+        self.show_preview = !self.show_preview;
+    }
 }
 
 fn build_ignore_matcher() -> ignore::gitignore::Gitignore {
@@ -117,15 +128,20 @@ fn list_files() -> io::Result<Vec<Entry>> {
 fn draw(ui: &mut Frame, app: &App, list_state: &mut ListState) {
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(2)].as_ref())
+        .constraints([Constraint::Min(1), Constraint::Length(5)].as_ref())
         .split(ui.size());
 
-    let horizontal_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)].as_ref())
-        .split(main_chunks[0]);
+    let content_area = if app.show_preview {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)].as_ref())
+            .split(main_chunks[0])
+            .to_vec()
+    } else {
+        vec![main_chunks[0]]
+    };
 
-    let items: Vec<ListItem> = app.items.iter().enumerate().map(|(i, e)| {
+    let items: Vec<ListItem> = app.items.iter().enumerate().map(|(_i, e)| {
         let mark = if e.selected { "✓" } else { " " };
         let line = format!(" [{}] {}", mark, e.name);
         let style = if e.hidden || e.ignored {
@@ -141,27 +157,37 @@ fn draw(ui: &mut Frame, app: &App, list_state: &mut ListState) {
         .highlight_style(Style::default().bg(Color::Cyan).fg(Color::Black))
         .highlight_symbol("› ");
 
-    ui.render_stateful_widget(list, horizontal_chunks[0], list_state);
+    ui.render_stateful_widget(list, content_area[0], list_state);
 
-    let preview_title = if app.items.is_empty() {
-        "Preview".to_string()
-    } else {
-        format!("Preview: {}", app.items[app.cursor].name)
-    };
+    if app.show_preview && content_area.len() > 1 {
+        let preview_title = if app.items.is_empty() {
+            "Preview".to_string()
+        } else {
+            format!("Preview: {}", app.items[app.cursor].name)
+        };
 
-    let preview = Paragraph::new(app.preview_content.as_str())
-        .block(Block::default().title(preview_title).borders(Borders::ALL))
-        .wrap(Wrap { trim: false })
-        .scroll((0, 0));
+        let preview = Paragraph::new(app.preview_content.as_str())
+            .block(Block::default().title(preview_title).borders(Borders::ALL))
+            .wrap(Wrap { trim: false })
+            .scroll((0, 0));
 
-    ui.render_widget(preview, horizontal_chunks[1]);
+        ui.render_widget(preview, content_area[1]);
+    }
 
-    let help = Paragraph::new(format!(
-        "[↑/↓ or j/k] move  [space] toggle  [a/A] all  [n] none  [shift+1..9] only nth  [shift+0] only last  [enter] confirm  [q/esc] quit   {} selected",
-        app.selected_count()
-    ))
-    .wrap(Wrap { trim: true });
-    ui.render_widget(help, main_chunks[1]);
+    let help_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)].as_ref())
+        .split(main_chunks[1]);
+
+    let navigation_help = Paragraph::new("Navigation:\n[↑/↓ or j/k] move cursor\n[space] toggle selection\n[enter] confirm  [q/esc] quit")
+        .block(Block::default().title("Controls").borders(Borders::ALL))
+        .wrap(Wrap { trim: false });
+    ui.render_widget(navigation_help, help_chunks[0]);
+
+    let selection_help = Paragraph::new(format!("Selection:\n[a/A] select all\n[n] select none\n[p] toggle preview\n\n{} selected", app.selected_count()))
+        .block(Block::default().title("Actions").borders(Borders::ALL))
+        .wrap(Wrap { trim: false });
+    ui.render_widget(selection_help, help_chunks[1]);
 }
 
 fn main() -> Result<()> {
@@ -201,6 +227,7 @@ fn main() -> Result<()> {
                 (KeyCode::Char('0'), KeyModifiers::SHIFT) => {
                     if !app.items.is_empty() { app.select_only_n(app.items.len() - 1); }
                 }
+                (KeyCode::Char('p'), _) => app.toggle_preview(),
                 _ => {}
             }
         }
