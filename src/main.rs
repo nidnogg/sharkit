@@ -1,0 +1,176 @@
+use std::{cmp::min, fs, io, path::PathBuf};
+use anyhow::Result;
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{
+    prelude::*,
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+};
+use ignore::gitignore::GitignoreBuilder;
+
+#[derive(Clone)]
+struct Entry {
+    name: String,
+    path: PathBuf,
+    hidden: bool,
+    ignored: bool,
+    selected: bool,
+}
+
+struct App {
+    items: Vec<Entry>,
+    cursor: usize,
+}
+
+impl App {
+    fn new(mut items: Vec<Entry>) -> Self {
+        items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        Self { items, cursor: 0 }
+    }
+    fn select_all(&mut self) {
+        for it in &mut self.items { it.selected = true; }
+    }
+    fn select_none(&mut self) {
+        for it in &mut self.items { it.selected = false; }
+    }
+    fn select_only_n(&mut self, n: usize) {
+        self.select_none();
+        if !self.items.is_empty() {
+            let idx = n.min(self.items.len() - 1);
+            self.items[idx].selected = true;
+            self.cursor = idx;
+        }
+    }
+    fn toggle_current(&mut self) {
+        if self.items.is_empty() { return; }
+        let it = &mut self.items[self.cursor];
+        it.selected = !it.selected;
+    }
+    fn move_up(&mut self) {
+        if self.items.is_empty() { return; }
+        if self.cursor == 0 { self.cursor = self.items.len() - 1; } else { self.cursor -= 1; }
+    }
+    fn move_down(&mut self) {
+        if self.items.is_empty() { return; }
+        self.cursor = (self.cursor + 1) % self.items.len();
+    }
+    fn selected_paths(&self) -> Vec<PathBuf> {
+        self.items.iter().filter(|e| e.selected).map(|e| e.path.clone()).collect()
+    }
+    fn selected_count(&self) -> usize {
+        self.items.iter().filter(|e| e.selected).count()
+    }
+}
+
+fn build_ignore_matcher() -> ignore::gitignore::Gitignore {
+    let mut builder = GitignoreBuilder::new(".");
+    let _ = builder.add(".gitignore");
+    builder.build().unwrap_or_else(|_| ignore::gitignore::Gitignore::empty())
+}
+
+fn list_files() -> io::Result<Vec<Entry>> {
+    let gi = build_ignore_matcher();
+    let mut out = Vec::new();
+    for ent in fs::read_dir(".")? {
+        let ent = ent?;
+        let path = ent.path();
+        if !path.is_file() { continue; }
+        let name = match path.file_name().and_then(|s| s.to_str()) { Some(s) => s.to_string(), None => continue };
+        let hidden = name.starts_with('.');
+        let ignored = gi.matched_path_or_any_parents(&path, false).is_ignore();
+        out.push(Entry { name, path, hidden, ignored, selected: false });
+    }
+    Ok(out)
+}
+
+fn draw(ui: &mut Frame, app: &App, list_state: &mut ListState) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)].as_ref())
+        .split(ui.size());
+
+    let items: Vec<ListItem> = app.items.iter().enumerate().map(|(i, e)| {
+        let mark = if e.selected { "✓" } else { " " };
+        let line = format!(" [{}] {}", mark, e.name);
+        let style = if e.hidden || e.ignored {
+            Style::default().fg(Color::Gray).add_modifier(Modifier::DIM)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        ListItem::new(line).style(style)
+    }).collect();
+
+    let list = List::new(items)
+        .block(Block::default().title("sharkit").borders(Borders::ALL))
+        .highlight_style(Style::default().bg(Color::Cyan).fg(Color::Black))
+        .highlight_symbol("› ");
+
+    ui.render_stateful_widget(list, chunks[0], list_state);
+
+    let help = Paragraph::new(format!(
+        "[↑/↓ or j/k] move  [space] toggle  [a/A] all  [n] none  [shift+1..9] only nth  [shift+0] only last  [enter] confirm  [q/esc] quit   {} selected",
+        app.selected_count()
+    ))
+    .wrap(Wrap { trim: true });
+    ui.render_widget(help, chunks[1]);
+}
+
+fn main() -> Result<()> {
+    let items = list_files()?;
+    let mut app = App::new(items);
+
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = ratatui::backend::CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    let mut list_state = ListState::default();
+    if !app.items.is_empty() { list_state.select(Some(0)); }
+
+    let mut confirmed = false;
+    loop {
+        terminal.draw(|f| draw(f, &app, &mut list_state))?;
+
+        if let Event::Key(KeyEvent { code, modifiers, .. }) = event::read()? {
+            match (code, modifiers) {
+                (KeyCode::Up, _) | (KeyCode::Char('k'), _) => { app.move_up(); list_state.select(Some(app.cursor)); }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), _) => { app.move_down(); list_state.select(Some(app.cursor)); }
+                (KeyCode::Char(' '), _) => app.toggle_current(),
+                (KeyCode::Char('a'), _) | (KeyCode::Char('A'), _) => app.select_all(),
+                (KeyCode::Char('n'), _) => app.select_none(),
+                (KeyCode::Enter, _) => { confirmed = true; break; }
+                (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => { confirmed = false; break; }
+                (KeyCode::Char('1'), KeyModifiers::SHIFT) => app.select_only_n(0),
+                (KeyCode::Char('2'), KeyModifiers::SHIFT) => app.select_only_n(1),
+                (KeyCode::Char('3'), KeyModifiers::SHIFT) => app.select_only_n(2),
+                (KeyCode::Char('4'), KeyModifiers::SHIFT) => app.select_only_n(3),
+                (KeyCode::Char('5'), KeyModifiers::SHIFT) => app.select_only_n(4),
+                (KeyCode::Char('6'), KeyModifiers::SHIFT) => app.select_only_n(5),
+                (KeyCode::Char('7'), KeyModifiers::SHIFT) => app.select_only_n(6),
+                (KeyCode::Char('8'), KeyModifiers::SHIFT) => app.select_only_n(7),
+                (KeyCode::Char('9'), KeyModifiers::SHIFT) => app.select_only_n(8),
+                (KeyCode::Char('0'), KeyModifiers::SHIFT) => {
+                    if !app.items.is_empty() { app.select_only_n(app.items.len() - 1); }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    disable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, LeaveAlternateScreen)?;
+
+    if confirmed {
+        let sel = app.selected_paths();
+        for p in sel {
+            println!("{}", pathdiff::diff_paths(&p, ".").unwrap_or(p).display());
+        }
+        std::process::exit(0);
+    } else {
+        std::process::exit(130);
+    }
+}

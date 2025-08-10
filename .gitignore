@@ -1,0 +1,34 @@
+# compiled output
+/target/
+
+# rust/cargo specific
+**/*.rs.bk
+Cargo.lock
+
+# if you are building a library, you might want to keep Cargo.lock
+# for binaries, consider ignoring it in libraries but committing in apps
+
+# backups, logs, and temp files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# macos
+.DS_Store
+
+# vscode
+.vscode/
+
+# idea / clion
+.idea/
+
+# other editors
+*.kate-swp
+
+# coverage
+/coverage/
+
+# dotenv files
+.env
+.env.*
